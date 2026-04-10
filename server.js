@@ -7,11 +7,10 @@ app.use(express.json());
 const APACTA_BASE = 'https://app.apacta.com/api/v1';
 const API_KEY = '9f35c080-8556-4595-bfd0-2da0c071ee63';
 
-// Tillad alle origins (mobilapp)
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Headers', 'Content-Type');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
@@ -28,19 +27,42 @@ app.get('/products', async (req, res) => {
   }
 });
 
-// POST opret tilbud
+// POST opret tilbud - prøver begge auth metoder
 app.post('/invoices', async (req, res) => {
   try {
-    const r = await fetch(`${APACTA_BASE}/invoices?api_key=${API_KEY}`, {
+    console.log('Opretter tilbud:', JSON.stringify(req.body));
+    
+    // Prøv med Bearer token
+    const r = await fetch(`${APACTA_BASE}/invoices`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${API_KEY}`,
+        'X-Auth-Token': API_KEY,
+      },
       body: JSON.stringify(req.body),
     });
+    
     const text = await r.text();
-    console.log('Apacta svar:', text.substring(0, 300));
-    const json = JSON.parse(text);
-    res.json(json);
+    console.log('Apacta HTTP status:', r.status);
+    console.log('Apacta svar:', text.substring(0, 500));
+    
+    if (text.startsWith('<')) {
+      // Prøv med api_key i URL som fallback
+      const r2 = await fetch(`${APACTA_BASE}/invoices?api_key=${API_KEY}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(req.body),
+      });
+      const text2 = await r2.text();
+      console.log('Fallback svar:', text2.substring(0, 500));
+      res.status(r2.status).send(text2);
+      return;
+    }
+    
+    res.status(r.status).send(text);
   } catch (err) {
+    console.error('Fejl:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -54,8 +76,8 @@ app.post('/invoices/:id/invoice_lines', async (req, res) => {
       body: JSON.stringify(req.body),
     });
     const text = await r.text();
-    const json = JSON.parse(text);
-    res.json(json);
+    console.log('Linje svar:', text.substring(0, 300));
+    res.status(r.status).send(text);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
