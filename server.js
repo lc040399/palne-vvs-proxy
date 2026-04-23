@@ -69,6 +69,39 @@ app.get('/contacts', async (req, res) => {
   res.status(r.status).send(r.text);
 });
 
+app.post('/contacts', async (req, res) => {
+  const key = apiKey(req);
+  const body = req.body || {};
+  if (!body.name || !String(body.name).trim()) {
+    return res.status(400).json({ error: 'name is required' });
+  }
+  const payload = {
+    name: String(body.name).trim(),
+  };
+  if (body.email) payload.email = body.email;
+  if (body.phone) payload.phone = body.phone;
+  if (body.address) payload.address = body.address;
+  if (body.cvr) payload.cvr = body.cvr;
+  if (body.description) payload.description = body.description;
+  if (body.website) payload.website = body.website;
+
+  const r = await apacta(`${PARTNER}/contacts`, {
+    method: 'POST',
+    headers: authHeaders(key),
+    body: JSON.stringify(payload),
+  });
+
+  if (!r.ok) {
+    return res.status(r.status).json({
+      error: 'Apacta createContact failed',
+      upstream_status: r.status,
+      upstream_body: r.data || r.text?.slice(0, 1000),
+    });
+  }
+
+  res.status(201).json(r.data || { success: true });
+});
+
 async function findDraftOfferStatusId(key) {
   const r = await apacta(`${INTERNAL}/offer-statuses`, {
     headers: authHeaders(key),
