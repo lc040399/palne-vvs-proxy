@@ -8,7 +8,13 @@ const INTERNAL = `${APACTA_BASE}/control-panel-api/v1`;
 const FALLBACK_KEY =
   process.env.APACTA_API_KEY || '9f35c080-8556-4595-bfd0-2da0c071ee63';
 
+const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
+const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5';
+
 const PORT = process.env.PORT || 3000;
+
+const OFFER_STATUS_TTL_MS = 10 * 60 * 1000;
+const offerStatusCache = new Map();
 
 const app = express();
 app.use(cors());
@@ -103,6 +109,9 @@ app.post('/contacts', async (req, res) => {
 });
 
 async function findDraftOfferStatusId(key) {
+  const cached = offerStatusCache.get(key);
+  if (cached && cached.expires > Date.now()) return cached.id;
+
   const r = await apacta(`${INTERNAL}/offer-statuses`, {
     headers: authHeaders(key),
   });
@@ -111,12 +120,15 @@ async function findDraftOfferStatusId(key) {
   const byIdentifier = list.find(
     (s) => (s.identifier || '').toLowerCase() === 'draft'
   );
-  if (byIdentifier) return byIdentifier.id;
   const byName = list.find((s) =>
     ['draft', 'kladde'].includes((s.name || '').toLowerCase())
   );
-  if (byName) return byName.id;
-  return list[0]?.id || null;
+  const id = byIdentifier?.id || byName?.id || list[0]?.id || null;
+
+  if (id) {
+    offerStatusCache.set(key, { id, expires: Date.now() + OFFER_STATUS_TTL_MS });
+  }
+  return id;
 }
 
 app.post('/offers', async (req, res) => {
@@ -278,6 +290,192 @@ app.post('/offers/:id/files', async (req, res) => {
     });
   }
 });
+
+const ANALYZE_SYSTEM_PROMPT = `Du er en erfaren dansk VVS-mester hos Palne Klima & VVS. Du laver realistiske tilbud på VVS-opgaver ud fra en kort beskrivelse og evt. billeder fra montøren i marken.
+
+Regler:
+- Svar KUN med gyldig JSON — ingen forklaring, ingen markdown, ingen code fences.
+- Alle priser er i DKK ekskl. moms (dansk moms er 25%).
+- Timepris for VVS-arbejde er 695 DKK/time, medmindre opgaven tydeligt kræver andet.
+- Materialer angives som separate line_items med realistiske danske priser.
+- Arbejdstid angives som egne line_items (unit: "time").
+- Hvis montøren nævner kørsel, læg et line_item til med unit: "stk" og beskrivende navn.
+- Vær realistisk med mængder og tid — undgå at oversælge.
+- Hvis opgaven er uklar, lav et fornuftigt gæt og nævn antagelserne i customer_message.
+
+JSON-skema:
+{
+  "title": "Kort titel på tilbuddet (dansk)",
+  "description": "2-4 sætninger om hvad opgaven omfatter (dansk)",
+  "line_items": [
+    {
+      "name": "Navn på materiale eller arbejde",
+      "description": "Valgfri uddybning",
+      "quantity": 1,
+      "unit": "stk" | "time" | "m" | "m²" | "sæt",
+      "unit_price": 0,
+      "product_id": null,
+      "kind": "material" | "labor" | "other"
+    }
+  ],
+  "customer_message": "En venlig personlig besked til kunden (dansk) med leveringstid, antagelser, og hvad der er inkluderet/ikke inkluderet."
+}`;
+
+function productCatalogSnippet(products) {
+  if (!products?.length) return '';
+  const sample = products.slice(0, 60).map((p) => ({
+    id: p.id,
+    name: p.name,
+    unit: p.unit,
+    price: p.sales_price,
+  }));
+  return `\n\nTilgængelige produkter i Apacta (brug gerne product_id hvis noget passer):\n${JSON.stringify(sample)}`;
+}
+
+app.post('/analyze', async (req, res) => {
+  if (!ANTHROPIC_KEY) {
+    return res.status(500).json({
+      error: 'ANTHROPIC_API_KEY missing on server',
+    });
+  }
+
+  const { description = '', products = [], images = [], model } = req.body || {};
+
+  const textBlock =
+    (description?.trim()
+      ? `Opgavebeskrivelse fra montøren:\n"""${description.trim()}"""`
+      : 'Montøren har ikke skrevet en beskrivelse — baser tilbuddet på vedhæftede billeder.') +
+    (images.length
+      ? `\n\n${images.length} billed${images.length === 1 ? '' : 'er'} af opgaven er vedhæftet — brug dem til at vurdere omfang og materialer.`
+      : '') +
+    productCatalogSnippet(products) +
+    `\n\nLav et tilbud som JSON nu.`;
+
+  const content = [];
+  for (const img of images) {
+    if (!img?.base64) continue;
+    content.push({
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: normalizeImageMime(img.mime),
+        data: img.base64,
+      },
+    });
+  }
+  content.push({ type: 'text', text: textBlock });
+
+  try {
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_KEY,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: model || ANTHROPIC_MODEL,
+        max_tokens: 2000,
+        system: ANALYZE_SYSTEM_PROMPT,
+        messages: [{ role: 'user', content }],
+      }),
+    });
+
+    const text = await r.text();
+    if (!r.ok) {
+      return res.status(r.status).json({
+        error: 'Claude request failed',
+        upstream_status: r.status,
+        upstream_body: text.slice(0, 1000),
+      });
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      return res.status(502).json({ error: 'Claude returned non-JSON', body: text.slice(0, 500) });
+    }
+
+    const rawText = (parsed?.content || [])
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n')
+      .trim();
+
+    const offer = parseOfferJson(rawText);
+    if (!offer) {
+      return res.status(502).json({
+        error: 'Could not parse Claude JSON',
+        raw: rawText.slice(0, 800),
+      });
+    }
+
+    res.json({ success: true, data: offer });
+  } catch (err) {
+    res.status(500).json({ error: 'analyze error', message: err?.message || String(err) });
+  }
+});
+
+function normalizeImageMime(mime) {
+  const allowed = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+  if (mime && allowed.includes(String(mime).toLowerCase())) {
+    return String(mime).toLowerCase();
+  }
+  return 'image/jpeg';
+}
+
+function parseOfferJson(text) {
+  if (!text) return null;
+  let raw = text.trim();
+  if (raw.startsWith('```')) {
+    raw = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '');
+  }
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start !== -1 && end !== -1 && end > start) {
+    raw = raw.slice(start, end + 1);
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    return {
+      title: String(parsed.title || 'Tilbud'),
+      description: String(parsed.description || ''),
+      customer_message: String(parsed.customer_message || ''),
+      line_items: Array.isArray(parsed.line_items)
+        ? parsed.line_items.map(normalizeLine).filter((li) => li.name)
+        : [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+function normalizeLine(li) {
+  const quantity = toNum(li.quantity, 1);
+  const unit_price = toNum(li.unit_price, 0);
+  const kind = ['material', 'labor', 'other'].includes(li.kind)
+    ? li.kind
+    : String(li.unit || '').toLowerCase() === 'time'
+      ? 'labor'
+      : 'material';
+  return {
+    name: String(li.name || '').trim(),
+    description: String(li.description || ''),
+    quantity,
+    unit: String(li.unit || 'stk'),
+    unit_price,
+    product_id: li.product_id || null,
+    kind,
+    vat_percent: 25,
+  };
+}
+
+function toNum(v, fallback) {
+  if (v === null || v === undefined || v === '') return fallback;
+  const n = typeof v === 'number' ? v : parseFloat(String(v).replace(',', '.'));
+  return Number.isFinite(n) ? n : fallback;
+}
 
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
 
