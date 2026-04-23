@@ -12,7 +12,7 @@ const PORT = process.env.PORT || 3000;
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '30mb' }));
 
 function apiKey(req) {
   return (
@@ -191,6 +191,59 @@ app.post('/offers', async (req, res) => {
     },
     note: is_draft === false ? undefined : 'Offer created as draft',
   });
+});
+
+app.post('/offers/:id/files', async (req, res) => {
+  const key = apiKey(req);
+  const offerId = req.params.id;
+  const files = Array.isArray(req.body?.files) ? req.body.files : [];
+
+  if (!files.length) {
+    return res.status(400).json({ error: 'No files provided' });
+  }
+
+  try {
+    const form = new FormData();
+    for (const f of files) {
+      if (!f.data_base64) continue;
+      const buf = Buffer.from(f.data_base64, 'base64');
+      const blob = new Blob([buf], { type: f.mime || 'image/jpeg' });
+      form.append('files[]', blob, f.name || `foto-${Date.now()}.jpg`);
+    }
+
+    const up = await fetch(`${INTERNAL}/offers/${offerId}/files`, {
+      method: 'POST',
+      headers: { Authorization: key },
+      body: form,
+    });
+
+    const text = await up.text();
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = null;
+    }
+
+    if (!up.ok) {
+      return res.status(up.status).json({
+        error: 'Apacta file upload failed',
+        upstream_status: up.status,
+        upstream_body: data || text?.slice(0, 1000),
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: data?.data || data,
+      uploaded: files.length,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      error: 'file upload error',
+      message: err?.message || String(err),
+    });
+  }
 });
 
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
