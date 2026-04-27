@@ -107,6 +107,19 @@ app.get('/auth/me', requireAuth, (req, res) => {
   res.json({ user: req.user });
 });
 
+app.post('/auth/delete-request', requireAuth, (req, res) => {
+  const note = String(req.body?.note || '').slice(0, 500);
+  const ts = new Date().toISOString();
+  console.log(
+    `[DELETE-REQUEST] ${ts} email=${req.user.email} name=${req.user.name} note=${JSON.stringify(note)}`
+  );
+  res.json({
+    success: true,
+    message:
+      'Anmodning om kontosletning modtaget. Palne behandler den indenfor 30 dage.',
+  });
+});
+
 app.get('/products', requireAuth, async (req, res) => {
   const key = apiKey(req);
   const qs = new URLSearchParams(req.query).toString();
