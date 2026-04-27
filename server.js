@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import jwt from 'jsonwebtoken';
 
 const APACTA_BASE = 'https://app.apacta.com';
 const PARTNER = `${APACTA_BASE}/api/v1`;
@@ -13,6 +14,22 @@ const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-haiku-4-5';
 
 const PORT = process.env.PORT || 3000;
 
+const JWT_SECRET =
+  process.env.JWT_SECRET || 'palne-vvs-dev-secret-change-me';
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '30d';
+
+const APP_USERS = (() => {
+  try {
+    const parsed = JSON.parse(process.env.APP_USERS || '[]');
+    if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+  } catch {
+    console.warn('Kunne ikke parse APP_USERS fra env, bruger fallback.');
+  }
+  return [
+    { email: 'lasse@palnevvs.dk', password: 'xwing123', name: 'Lasse' },
+  ];
+})();
+
 const OFFER_STATUS_TTL_MS = 10 * 60 * 1000;
 const offerStatusCache = new Map();
 
@@ -21,11 +38,22 @@ app.use(cors());
 app.use(express.json({ limit: '30mb' }));
 
 function apiKey(req) {
-  return (
-    req.header('x-apacta-api-key') ||
-    req.header('authorization')?.replace(/^Bearer\s+/i, '') ||
-    FALLBACK_KEY
-  );
+  return req.header('x-apacta-api-key') || FALLBACK_KEY;
+}
+
+function requireAuth(req, res, next) {
+  const auth = req.header('authorization') || '';
+  const token = auth.replace(/^Bearer\s+/i, '').trim();
+  if (!token) {
+    return res.status(401).json({ error: 'Ikke logget ind' });
+  }
+  try {
+    const payload = jwt.verify(token, JWT_SECRET);
+    req.user = { email: payload.email, name: payload.name };
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Token udlobet eller ugyldigt' });
+  }
 }
 
 function authHeaders(key) {
@@ -50,7 +78,36 @@ async function apacta(url, opts = {}) {
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
-app.get('/products', async (req, res) => {
+app.post('/auth/login', (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email og password kraeves' });
+  }
+  const lookup = String(email).trim().toLowerCase();
+  const user = APP_USERS.find(
+    (u) =>
+      String(u.email || '').toLowerCase() === lookup &&
+      String(u.password || '') === String(password)
+  );
+  if (!user) {
+    return res.status(401).json({ error: 'Forkert email eller password' });
+  }
+  const token = jwt.sign(
+    { email: user.email, name: user.name },
+    JWT_SECRET,
+    { expiresIn: JWT_EXPIRES_IN }
+  );
+  res.json({
+    token,
+    user: { email: user.email, name: user.name },
+  });
+});
+
+app.get('/auth/me', requireAuth, (req, res) => {
+  res.json({ user: req.user });
+});
+
+app.get('/products', requireAuth, async (req, res) => {
   const key = apiKey(req);
   const qs = new URLSearchParams(req.query).toString();
   const url = `${PARTNER}/products?${qs}`;
@@ -58,7 +115,7 @@ app.get('/products', async (req, res) => {
   res.status(r.status).send(r.text);
 });
 
-app.get('/offer-statuses', async (req, res) => {
+app.get('/offer-statuses', requireAuth, async (req, res) => {
   const key = apiKey(req);
   const r = await apacta(`${INTERNAL}/offer-statuses`, {
     headers: authHeaders(key),
@@ -66,7 +123,7 @@ app.get('/offer-statuses', async (req, res) => {
   res.status(r.status).send(r.text);
 });
 
-app.get('/contacts', async (req, res) => {
+app.get('/contacts', requireAuth, async (req, res) => {
   const key = apiKey(req);
   const qs = new URLSearchParams(req.query).toString();
   const r = await apacta(`${PARTNER}/contacts${qs ? `?${qs}` : ''}`, {
@@ -75,7 +132,7 @@ app.get('/contacts', async (req, res) => {
   res.status(r.status).send(r.text);
 });
 
-app.post('/contacts', async (req, res) => {
+app.post('/contacts', requireAuth, async (req, res) => {
   const key = apiKey(req);
   const body = req.body || {};
   if (!body.name || !String(body.name).trim()) {
@@ -131,7 +188,7 @@ async function findDraftOfferStatusId(key) {
   return id;
 }
 
-app.post('/offers', async (req, res) => {
+app.post('/offers', requireAuth, async (req, res) => {
   const key = apiKey(req);
   const body = req.body || {};
   const {
@@ -238,7 +295,7 @@ app.post('/offers', async (req, res) => {
   });
 });
 
-app.post('/offers/:id/files', async (req, res) => {
+app.post('/offers/:id/files', requireAuth, async (req, res) => {
   const key = apiKey(req);
   const offerId = req.params.id;
   const files = Array.isArray(req.body?.files) ? req.body.files : [];
@@ -294,32 +351,58 @@ app.post('/offers/:id/files', async (req, res) => {
 const ANALYZE_SYSTEM_PROMPT = `Du er en erfaren dansk VVS-mester hos Palne Klima & VVS. Du laver realistiske tilbud på VVS-opgaver ud fra en kort beskrivelse og evt. billeder fra montøren i marken.
 
 Regler:
-- Svar KUN med gyldig JSON — ingen forklaring, ingen markdown, ingen code fences.
+- Brug det medfølgende "create_offer" værktøj til at aflevere tilbuddet. Svar ikke med tekst — kald altid værktøjet.
 - Alle priser er i DKK ekskl. moms (dansk moms er 25%).
 - Timepris for VVS-arbejde er 695 DKK/time, medmindre opgaven tydeligt kræver andet.
 - Materialer angives som separate line_items med realistiske danske priser.
 - Arbejdstid angives som egne line_items (unit: "time").
 - Hvis montøren nævner kørsel, læg et line_item til med unit: "stk" og beskrivende navn.
 - Vær realistisk med mængder og tid — undgå at oversælge.
-- Hvis opgaven er uklar, lav et fornuftigt gæt og nævn antagelserne i customer_message.
+- Hvis opgaven er uklar, lav et fornuftigt gæt og nævn antagelserne i customer_message.`;
 
-JSON-skema:
-{
-  "title": "Kort titel på tilbuddet (dansk)",
-  "description": "2-4 sætninger om hvad opgaven omfatter (dansk)",
-  "line_items": [
-    {
-      "name": "Navn på materiale eller arbejde",
-      "description": "Valgfri uddybning",
-      "quantity": 1,
-      "unit": "stk" | "time" | "m" | "m²" | "sæt",
-      "unit_price": 0,
-      "product_id": null,
-      "kind": "material" | "labor" | "other"
-    }
-  ],
-  "customer_message": "En venlig personlig besked til kunden (dansk) med leveringstid, antagelser, og hvad der er inkluderet/ikke inkluderet."
-}`;
+const CREATE_OFFER_TOOL = {
+  name: 'create_offer',
+  description:
+    'Aflever et færdigt VVS-tilbud med titel, beskrivelse, line_items og en kundebesked.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      title: { type: 'string', description: 'Kort titel på tilbuddet (dansk)' },
+      description: {
+        type: 'string',
+        description: '2-4 sætninger om hvad opgaven omfatter (dansk)',
+      },
+      line_items: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            description: { type: 'string' },
+            quantity: { type: 'number' },
+            unit: {
+              type: 'string',
+              enum: ['stk', 'time', 'm', 'm²', 'sæt'],
+            },
+            unit_price: { type: 'number' },
+            product_id: { type: ['string', 'null'] },
+            kind: {
+              type: 'string',
+              enum: ['material', 'labor', 'other'],
+            },
+          },
+          required: ['name', 'quantity', 'unit', 'unit_price', 'kind'],
+        },
+      },
+      customer_message: {
+        type: 'string',
+        description:
+          'Venlig personlig besked til kunden (dansk) med leveringstid, antagelser og hvad der er inkluderet/ikke inkluderet.',
+      },
+    },
+    required: ['title', 'description', 'line_items', 'customer_message'],
+  },
+};
 
 function productCatalogSnippet(products) {
   if (!products?.length) return '';
@@ -332,7 +415,7 @@ function productCatalogSnippet(products) {
   return `\n\nTilgængelige produkter i Apacta (brug gerne product_id hvis noget passer):\n${JSON.stringify(sample)}`;
 }
 
-app.post('/analyze', async (req, res) => {
+app.post('/analyze', requireAuth, async (req, res) => {
   if (!ANTHROPIC_KEY) {
     return res.status(500).json({
       error: 'ANTHROPIC_API_KEY missing on server',
@@ -349,7 +432,7 @@ app.post('/analyze', async (req, res) => {
       ? `\n\n${images.length} billed${images.length === 1 ? '' : 'er'} af opgaven er vedhæftet — brug dem til at vurdere omfang og materialer.`
       : '') +
     productCatalogSnippet(products) +
-    `\n\nLav et tilbud som JSON nu.`;
+    `\n\nAflever tilbuddet nu via create_offer-værktøjet.`;
 
   const content = [];
   for (const img of images) {
@@ -375,8 +458,10 @@ app.post('/analyze', async (req, res) => {
       },
       body: JSON.stringify({
         model: model || ANTHROPIC_MODEL,
-        max_tokens: 2000,
+        max_tokens: 8000,
         system: ANALYZE_SYSTEM_PROMPT,
+        tools: [CREATE_OFFER_TOOL],
+        tool_choice: { type: 'tool', name: 'create_offer' },
         messages: [{ role: 'user', content }],
       }),
     });
@@ -397,20 +482,28 @@ app.post('/analyze', async (req, res) => {
       return res.status(502).json({ error: 'Claude returned non-JSON', body: text.slice(0, 500) });
     }
 
-    const rawText = (parsed?.content || [])
-      .filter((b) => b.type === 'text')
-      .map((b) => b.text)
-      .join('\n')
-      .trim();
+    const toolUse = (parsed?.content || []).find((b) => b.type === 'tool_use' && b.name === 'create_offer');
 
-    const offer = parseOfferJson(rawText);
-    if (!offer) {
+    if (!toolUse) {
+      if (parsed?.stop_reason === 'max_tokens') {
+        return res.status(502).json({
+          error: 'Tilbuddet blev for langt — Claude ramte token-loftet',
+          stop_reason: parsed.stop_reason,
+        });
+      }
+      const rawText = (parsed?.content || [])
+        .filter((b) => b.type === 'text')
+        .map((b) => b.text)
+        .join('\n')
+        .trim();
       return res.status(502).json({
-        error: 'Could not parse Claude JSON',
+        error: 'Claude returnerede ikke et tilbud',
+        stop_reason: parsed?.stop_reason,
         raw: rawText.slice(0, 800),
       });
     }
 
+    const offer = normalizeOfferInput(toolUse.input || {});
     res.json({ success: true, data: offer });
   } catch (err) {
     res.status(500).json({ error: 'analyze error', message: err?.message || String(err) });
@@ -425,30 +518,15 @@ function normalizeImageMime(mime) {
   return 'image/jpeg';
 }
 
-function parseOfferJson(text) {
-  if (!text) return null;
-  let raw = text.trim();
-  if (raw.startsWith('```')) {
-    raw = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '');
-  }
-  const start = raw.indexOf('{');
-  const end = raw.lastIndexOf('}');
-  if (start !== -1 && end !== -1 && end > start) {
-    raw = raw.slice(start, end + 1);
-  }
-  try {
-    const parsed = JSON.parse(raw);
-    return {
-      title: String(parsed.title || 'Tilbud'),
-      description: String(parsed.description || ''),
-      customer_message: String(parsed.customer_message || ''),
-      line_items: Array.isArray(parsed.line_items)
-        ? parsed.line_items.map(normalizeLine).filter((li) => li.name)
-        : [],
-    };
-  } catch {
-    return null;
-  }
+function normalizeOfferInput(input) {
+  return {
+    title: String(input.title || 'Tilbud'),
+    description: String(input.description || ''),
+    customer_message: String(input.customer_message || ''),
+    line_items: Array.isArray(input.line_items)
+      ? input.line_items.map(normalizeLine).filter((li) => li.name)
+      : [],
+  };
 }
 
 function normalizeLine(li) {
