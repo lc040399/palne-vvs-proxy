@@ -555,6 +555,55 @@ function toNum(v, fallback) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+app.get('/cvr/:cvr', requireAuth, async (req, res) => {
+  const cvr = String(req.params.cvr || '').replace(/\D/g, '');
+  if (cvr.length !== 8) {
+    return res.status(400).json({ error: 'CVR skal vaere 8 cifre' });
+  }
+  try {
+    const r = await fetch(
+      `https://cvrapi.dk/api?country=dk&search=${cvr}&format=json`,
+      {
+        headers: {
+          'User-Agent': 'palne-vvs-proxy (lasse@palnevvs.dk)',
+          Accept: 'application/json',
+        },
+      }
+    );
+    const text = await r.text();
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = null;
+    }
+    if (!r.ok || !data || data.error || !data.name) {
+      const code = r.status === 404 || data?.error ? 404 : r.status || 502;
+      return res.status(code).json({
+        error: data?.error || `Intet CVR fundet`,
+        upstream_status: r.status,
+      });
+    }
+    return res.json({
+      cvr,
+      name: data.name || '',
+      address_line: data.address || '',
+      zipcode: data.zipcode ? String(data.zipcode) : '',
+      city: data.city || '',
+      phone: data.phone ? String(data.phone) : '',
+      email: data.email || '',
+      industry_desc: data.industrydesc || '',
+      company_desc: data.companydesc || '',
+      protected: !!data.protected,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      error: 'CVR-opslag fejlede',
+      message: err?.message || String(err),
+    });
+  }
+});
+
 app.use((_req, res) => res.status(404).json({ error: 'Not found' }));
 
 app.listen(PORT, () => {
