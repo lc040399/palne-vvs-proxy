@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
 
 const APACTA_BASE = 'https://app.apacta.com';
 const PARTNER = `${APACTA_BASE}/api/v1`;
@@ -78,6 +79,21 @@ async function apacta(url, opts = {}) {
 
 app.get('/health', (_req, res) => res.json({ ok: true }));
 
+function verifyUserPassword(user, password) {
+  if (!user) return false;
+  if (user.password_hash) {
+    try {
+      return bcrypt.compareSync(String(password), String(user.password_hash));
+    } catch {
+      return false;
+    }
+  }
+  if (user.password != null) {
+    return String(user.password) === String(password);
+  }
+  return false;
+}
+
 app.post('/auth/login', (req, res) => {
   const { email, password } = req.body || {};
   if (!email || !password) {
@@ -85,11 +101,9 @@ app.post('/auth/login', (req, res) => {
   }
   const lookup = String(email).trim().toLowerCase();
   const user = APP_USERS.find(
-    (u) =>
-      String(u.email || '').toLowerCase() === lookup &&
-      String(u.password || '') === String(password)
+    (u) => String(u.email || '').toLowerCase() === lookup
   );
-  if (!user) {
+  if (!user || !verifyUserPassword(user, password)) {
     return res.status(401).json({ error: 'Forkert email eller password' });
   }
   const token = jwt.sign(
@@ -305,6 +319,54 @@ app.post('/offers', requireAuth, async (req, res) => {
       lines_failed: lineResults.filter((x) => !x.ok),
     },
     note: is_draft === false ? undefined : 'Offer created as draft',
+  });
+});
+
+async function fetchStatusName(key, statusId) {
+  if (!statusId) return null;
+  const cacheKey = `${key}_all`;
+  const cached = offerStatusCache.get(cacheKey);
+  let list = cached?.list;
+  if (!list || cached.expires <= Date.now()) {
+    const r = await apacta(`${INTERNAL}/offer-statuses`, {
+      headers: authHeaders(key),
+    });
+    if (!r.ok) return null;
+    list = r.data?.data || [];
+    offerStatusCache.set(cacheKey, {
+      list,
+      expires: Date.now() + OFFER_STATUS_TTL_MS,
+    });
+  }
+  const found = list.find((s) => s.id === statusId);
+  return found?.name || found?.identifier || null;
+}
+
+app.get('/offers/:id', requireAuth, async (req, res) => {
+  const key = apiKey(req);
+  const offerId = req.params.id;
+  const r = await apacta(`${INTERNAL}/offers/${offerId}`, {
+    headers: authHeaders(key),
+  });
+  if (!r.ok) {
+    return res.status(r.status).json({
+      error: 'Apacta getOffer failed',
+      upstream_status: r.status,
+      upstream_body: r.data || r.text?.slice(0, 1000),
+    });
+  }
+  const data = r.data?.data || r.data || {};
+  const statusName = await fetchStatusName(key, data.offer_status_id);
+  res.json({
+    id: data.id || offerId,
+    title: data.title || null,
+    offer_status_id: data.offer_status_id || null,
+    status_name: statusName,
+    is_draft: data.is_draft ?? null,
+    sent_at: data.sent_at || null,
+    accepted_at: data.accepted_at || null,
+    rejected_at: data.rejected_at || null,
+    expired_at: data.expired_at || null,
   });
 });
 
