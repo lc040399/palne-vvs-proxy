@@ -433,7 +433,18 @@ Regler:
 - Arbejdstid angives som egne line_items (unit: "time").
 - Hvis montøren nævner kørsel, læg et line_item til med unit: "stk" og beskrivende navn.
 - Vær realistisk med mængder og tid — undgå at oversælge.
-- Hvis opgaven er uklar, lav et fornuftigt gæt og nævn antagelserne i customer_message.`;
+- Hvis opgaven er uklar, lav et fornuftigt gæt og nævn antagelserne i customer_message.
+
+Visuel analyse af billeder:
+Når der er vedhæftet billeder, SKAL du aktivt analysere dem og udlede konkrete mængder/dimensioner — ikke bare beskrive overordnet:
+- Identificér VVS-komponenter præcist (mærke + model hvis muligt): "Geberit Sigma cisterne", "Grohe Eurosmart blandebatteri", "Velux Hybridvarmtvandsbeholder 110L".
+- Bestem rør-dimensioner ud fra synlige fittings og standardstørrelser. Standard danske afløbsrør: 32 mm (håndvask), 50 mm (køkkenvask, brus), 75 mm (toilet bagudløb sjældent), 110 mm (toilet, hovedfaldstamme). Vandinstallation: typisk 15 mm (PEX/kobber), 22 mm (hovedstreng).
+- Estimér længder/areal med synlige reference-objekter: en standard flise er 30×30, 30×60 eller 60×60 cm; en stikkontakt er 8.5×8.5 cm; en almindelig dør er 89 cm bred; et toilet er ca. 36×65 cm; en vask er typisk 55×42 cm; en standardradiator er 60 cm høj.
+- Ved fliseopsætning: tæl synlige fliser, gang med standardstørrelse for at få m². Tilføj 10% spild.
+- Ved rør-trækninger: estimér længde i meter ud fra rummets dimensioner, læg fittings og bøjninger til.
+- Hvis du IKKE kan estimere en dimension med rimelig sikkerhed, brug et konservativt gæt og skriv eksplicit i customer_message: "Endeligt målearbejde sker på stedet — angivne mængder er estimater fra billede".
+- Identificér problemer der kræver ekstra arbejde: rust på rør (rørudskiftning), kalk-aflejringer (afkalkning), dårlig montage (omfittinger), skimmelspor bag fliser (vådrumsmembran), ulovlige installationer (skal lovliggøres).
+- Hvis montøren ikke har skrevet beskrivelse: udled hele opgaven fra billederne alene.`;
 
 const CREATE_OFFER_TOOL = {
   name: 'create_offer',
