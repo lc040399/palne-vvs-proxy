@@ -435,12 +435,19 @@ app.post('/analyze', requireAuth, async (req, res) => {
     });
   }
 
-  const { description = '', products = [], images = [], model } = req.body || {};
+  const { description = '', products = [], images = [], customer = null, model } = req.body || {};
+
+  const customerBlock = customer?.name
+    ? `\n\nKunde: ${customer.name}` +
+      (customer.address ? ` (${customer.address})` : '') +
+      `\nBrug kundens navn i customer_message hvor det føles naturligt.`
+    : '';
 
   const textBlock =
     (description?.trim()
       ? `Opgavebeskrivelse fra montøren:\n"""${description.trim()}"""`
       : 'Montøren har ikke skrevet en beskrivelse — baser tilbuddet på vedhæftede billeder.') +
+    customerBlock +
     (images.length
       ? `\n\n${images.length} billed${images.length === 1 ? '' : 'er'} af opgaven er vedhæftet — brug dem til at vurdere omfang og materialer.`
       : '') +
